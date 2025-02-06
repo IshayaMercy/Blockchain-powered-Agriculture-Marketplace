@@ -196,3 +196,28 @@
         (ok true)
     )
 )
+
+
+
+;; Add to Data Maps
+(define-map escrow-holdings
+    { buyer: principal, seller: principal }
+    {
+        amount: uint,
+        released: bool
+    }
+)
+
+;; Add Public Function
+(define-public (create-escrow (seller principal) (amount uint))
+    (begin
+        (try! (stx-transfer? amount tx-sender contract-owner))
+        (map-set escrow-holdings {buyer: tx-sender, seller: seller}
+            {
+                amount: amount,
+                released: false
+            }
+        )
+        (ok true)
+    )
+)
