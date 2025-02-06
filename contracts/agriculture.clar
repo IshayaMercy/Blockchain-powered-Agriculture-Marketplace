@@ -88,3 +88,30 @@
         (ok true)
     )
 )
+
+
+
+
+;; Add to Data Maps
+(define-map crop-seasons
+    (string-utf8 50)  ;; crop type
+    {
+        planting-month: uint,
+        harvest-month: uint
+    }
+)
+
+;; Add Public Function
+(define-public (add-crop-season (crop-type (string-utf8 50)) (plant-month uint) (harvest-month uint))
+    (begin
+        (asserts! (and (>= plant-month u1) (<= plant-month u12)) (err u106))
+        (asserts! (and (>= harvest-month u1) (<= harvest-month u12)) (err u107))
+        (map-set crop-seasons crop-type
+            {
+                planting-month: plant-month,
+                harvest-month: harvest-month
+            }
+        )
+        (ok true)
+    )
+)
