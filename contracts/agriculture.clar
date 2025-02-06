@@ -115,3 +115,29 @@
         (ok true)
     )
 )
+
+
+
+
+;; Add to Data Maps
+(define-map bulk-discounts
+    principal
+    {
+        min-quantity: uint,
+        discount-percentage: uint
+    }
+)
+
+;; Add Public Function
+(define-public (set-bulk-discount (min-qty uint) (discount uint))
+    (begin
+        (asserts! (<= discount u50) (err u108))  ;; Max 50% discount
+        (map-set bulk-discounts tx-sender
+            {
+                min-quantity: min-qty,
+                discount-percentage: discount
+            }
+        )
+        (ok true)
+    )
+)
