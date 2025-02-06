@@ -63,3 +63,28 @@
 (define-read-only (get-investment (investor principal) (farmer principal))
     (map-get? investments {investor: investor, farmer: farmer})
 )
+
+
+
+;; Add to Data Maps
+(define-map crop-ratings
+    { farmer: principal, reviewer: principal }
+    {
+        rating: uint,  ;; 1-5 rating
+        review: (string-utf8 100)
+    }
+)
+
+;; Add Public Function
+(define-public (rate-farmer (farmer principal) (rating uint) (review (string-utf8 100)))
+    (begin
+        (asserts! (and (>= rating u1) (<= rating u5)) (err u105))
+        (map-set crop-ratings {farmer: farmer, reviewer: tx-sender}
+            {
+                rating: rating,
+                review: review
+            }
+        )
+        (ok true)
+    )
+)
