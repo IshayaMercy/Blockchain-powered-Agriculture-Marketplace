@@ -141,3 +141,30 @@
         (ok true)
     )
 )
+
+
+
+;; Add to Data Maps
+(define-map insurance-policies
+    { farmer: principal, investor: principal }
+    {
+        coverage-amount: uint,
+        premium-paid: uint,
+        active: bool
+    }
+)
+
+;; Add Public Function
+(define-public (purchase-insurance (farmer principal) (coverage uint))
+    (let ((premium (* coverage u5)))  ;; 5% premium
+        (try! (stx-transfer? premium tx-sender contract-owner))
+        (map-set insurance-policies {farmer: farmer, investor: tx-sender}
+            {
+                coverage-amount: coverage,
+                premium-paid: premium,
+                active: true
+            }
+        )
+        (ok true)
+    )
+)
