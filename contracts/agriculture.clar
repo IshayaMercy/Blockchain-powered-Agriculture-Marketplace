@@ -168,3 +168,31 @@
         (ok true)
     )
 )
+
+
+
+
+;; Add to Data Maps
+(define-map organic-certifications
+    principal
+    {
+        certified: bool,
+        certification-date: uint,
+        expiry-date: uint
+    }
+)
+
+;; Add Public Function
+(define-public (certify-organic (farmer principal) (valid-until uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set organic-certifications farmer
+            {
+                certified: true,
+                certification-date: stacks-block-height,
+                expiry-date: valid-until
+            }
+        )
+        (ok true)
+    )
+)
