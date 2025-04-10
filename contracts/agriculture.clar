@@ -755,3 +755,124 @@
 (define-read-only (get-farmer-reputation (farmer principal))
     (map-get? farmer-reputation farmer)
 )
+
+
+
+(define-map yield-history
+    { farmer: principal, crop-type: (string-utf8 50), season: uint }
+    {
+        planted-amount: uint,
+        harvested-amount: uint,
+        success-rate: uint
+    }
+)
+
+(define-map yield-predictions
+    { farmer: principal, crop-type: (string-utf8 50) }
+    {
+        predicted-yield: uint,
+        confidence-score: uint,
+        last-updated: uint
+    }
+)
+
+(define-public (record-yield-results (crop-type (string-utf8 50)) (planted uint) (harvested uint))
+    (let
+        (
+            (success-percentage (* (/ harvested planted) u100))
+            (current-season (/ stacks-block-height u144))
+        )
+        (map-set yield-history 
+            { farmer: tx-sender, crop-type: crop-type, season: current-season }
+            {
+                planted-amount: planted,
+                harvested-amount: harvested,
+                success-rate: success-percentage
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (calculate-yield-prediction (crop-type (string-utf8 50)))
+    (let
+        (
+            (current-season (/ stacks-block-height u144))
+            (last-season (- current-season u1))
+            (previous-yield (unwrap! (map-get? yield-history 
+                { farmer: tx-sender, crop-type: crop-type, season: last-season }) 
+                (err u200)))
+        )
+        (map-set yield-predictions
+            { farmer: tx-sender, crop-type: crop-type }
+            {
+                predicted-yield: (get harvested-amount previous-yield),
+                confidence-score: (get success-rate previous-yield),
+                last-updated: stacks-block-height
+            }
+        )
+        (ok true)
+    )
+)
+
+
+(define-map market-metrics
+    (string-utf8 50)
+    {
+        total-supply: uint,
+        total-demand: uint,
+        base-price: uint,
+        last-updated: uint
+    }
+)
+
+(define-map price-adjustments
+    { crop-type: (string-utf8 50), timestamp: uint }
+    {
+        old-price: uint,
+        new-price: uint,
+        change-percentage: uint
+    }
+)
+
+(define-public (update-market-metrics (crop-type (string-utf8 50)) (supply uint) (demand uint))
+    (let
+        (
+            (current-metrics (default-to
+                { total-supply: u0, total-demand: u0, base-price: u0, last-updated: u0 }
+                (map-get? market-metrics crop-type)))
+        )
+        (map-set market-metrics crop-type
+            {
+                total-supply: supply,
+                total-demand: demand,
+                base-price: (get base-price current-metrics),
+                last-updated: stacks-block-height
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (calculate-dynamic-price (crop-type (string-utf8 50)))
+    (let
+        (
+            (metrics (unwrap! (map-get? market-metrics crop-type) (err u300)))
+            (supply (get total-supply metrics))
+            (demand (get total-demand metrics))
+            (base-price (get base-price metrics))
+            (new-price (if (> demand supply)
+                (* base-price u12 u10)
+                (* base-price u8 u10)))
+        )
+        (map-set price-adjustments 
+            { crop-type: crop-type, timestamp: stacks-block-height }
+            {
+                old-price: base-price,
+                new-price: new-price,
+                change-percentage: (/ (* (- new-price base-price) u100) base-price)
+            }
+        )
+        (ok true)
+    )
+)
