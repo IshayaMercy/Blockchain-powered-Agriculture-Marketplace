@@ -876,3 +876,148 @@
         (ok true)
     )
 )
+
+
+
+(define-map quality-checkpoints
+    { batch-id: (string-utf8 30), stage: (string-utf8 20) }
+    {
+        inspector: principal,
+        timestamp: uint,
+        score: uint,
+        moisture-level: uint,
+        temperature: uint,
+        certification-hash: (buff 32)
+    }
+)
+
+(define-map quality-thresholds
+    (string-utf8 50)
+    {
+        min-score: uint,
+        max-moisture: uint,
+        min-temperature: uint,
+        max-temperature: uint
+    }
+)
+
+(define-public (record-quality-check 
+    (batch-id (string-utf8 30)) 
+    (stage (string-utf8 20)) 
+    (score uint) 
+    (moisture uint) 
+    (temp uint) 
+    (cert-hash (buff 32)))
+    (begin
+        (asserts! (and (>= score u0) (<= score u100)) (err u501))
+        (map-set quality-checkpoints
+            { batch-id: batch-id, stage: stage }
+            {
+                inspector: tx-sender,
+                timestamp: stacks-block-height,
+                score: score,
+                moisture-level: moisture,
+                temperature: temp,
+                certification-hash: cert-hash
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (verify-quality-compliance (batch-id (string-utf8 30)) (stage (string-utf8 20)))
+    (match (map-get? quality-checkpoints { batch-id: batch-id, stage: stage })
+        checkpoint (ok checkpoint)
+        (err u502)
+    )
+)
+
+(define-map weather-risk-parameters
+    (string-utf8 50)  ;; crop-type
+    {
+        max-temperature: uint,
+        min-temperature: uint,
+        max-rainfall: uint,
+        min-rainfall: uint,
+        coverage-multiplier: uint
+    }
+)
+
+(define-map insurance-policies-v2
+    { policy-id: (string-utf8 30), farmer: principal }
+    {
+        crop-type: (string-utf8 50),
+        coverage-amount: uint,
+        start-block: uint,
+        end-block: uint,
+        premium-paid: uint,
+        claim-paid: bool,
+        risk-score: uint
+    }
+)
+
+(define-map weather-events
+    uint  ;; block height
+    {
+        temperature: uint,
+        rainfall: uint,
+        wind-speed: uint,
+        reported-by: principal
+    }
+)
+
+(define-public (create-parametric-insurance 
+    (policy-id (string-utf8 30)) 
+    (crop-type (string-utf8 50)) 
+    (coverage uint) 
+    (duration uint))
+    (let
+        (
+            (premium-amount (/ (* coverage u5) u100))
+            (risk-params (unwrap! (map-get? weather-risk-parameters crop-type) (err u601)))
+        )
+        (try! (stx-transfer? premium-amount tx-sender contract-owner))
+        (map-set insurance-policies-v2
+            { policy-id: policy-id, farmer: tx-sender }
+            {
+                crop-type: crop-type,
+                coverage-amount: coverage,
+                start-block: stacks-block-height,
+                end-block: (+ stacks-block-height duration),
+                premium-paid: premium-amount,
+                claim-paid: false,
+                risk-score: u0
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (process-weather-claim (policy-id (string-utf8 30)))
+    (let
+        (
+            (policy (unwrap! (map-get? insurance-policies-v2 
+                { policy-id: policy-id, farmer: tx-sender }) 
+                (err u602)))
+            (weather-data (unwrap! (map-get? weather-events stacks-block-height) 
+                (err u603)))
+            (risk-params (unwrap! (map-get? weather-risk-parameters 
+                (get crop-type policy)) 
+                (err u604)))
+        )
+        (asserts! (not (get claim-paid policy)) (err u605))
+        (if (or
+            (> (get temperature weather-data) (get max-temperature risk-params))
+            (< (get temperature weather-data) (get min-temperature risk-params)))
+            (begin
+                (try! (stx-transfer? (get coverage-amount policy) 
+                    contract-owner 
+                    tx-sender))
+                (map-set insurance-policies-v2
+                    { policy-id: policy-id, farmer: tx-sender }
+                    (merge policy { claim-paid: true }))
+                (ok true))
+            (ok false)
+        )
+    )
+)
