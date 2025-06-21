@@ -1021,3 +1021,293 @@
         )
     )
 )
+
+(define-constant err-insufficient-credits (err u700))
+(define-constant err-invalid-practice (err u701))
+(define-constant err-credit-not-verified (err u702))
+(define-constant err-invalid-credit-amount (err u703))
+
+(define-map carbon-credits
+    principal
+    {
+        total-credits: uint,
+        available-credits: uint,
+        credits-sold: uint,
+        last-updated: uint
+    }
+)
+
+(define-map sustainable-practices
+    { farmer: principal, practice-id: (string-utf8 30) }
+    {
+        practice-type: (string-utf8 50),
+        implementation-date: uint,
+        area-covered: uint,
+        credits-per-period: uint,
+        verified: bool,
+        verifier: (optional principal)
+    }
+)
+
+(define-map carbon-credit-trades
+    { trade-id: (string-utf8 30), seller: principal }
+    {
+        buyer: principal,
+        credits-amount: uint,
+        price-per-credit: uint,
+        total-price: uint,
+        trade-date: uint,
+        completed: bool
+    }
+)
+
+(define-map carbon-verifiers
+    principal
+    {
+        name: (string-utf8 50),
+        active: bool,
+        verifications-completed: uint
+    }
+)
+
+(define-map practice-credit-rates
+    (string-utf8 50)
+    {
+        credits-per-hectare: uint,
+        minimum-area: uint,
+        verification-required: bool
+    }
+)
+
+(define-public (register-carbon-verifier (verifier-name (string-utf8 50)))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set carbon-verifiers tx-sender
+            {
+                name: verifier-name,
+                active: true,
+                verifications-completed: u0
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (set-practice-credit-rate (practice-type (string-utf8 50)) (credits-per-hectare uint) (min-area uint) (requires-verification bool))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set practice-credit-rates practice-type
+            {
+                credits-per-hectare: credits-per-hectare,
+                minimum-area: min-area,
+                verification-required: requires-verification
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (register-sustainable-practice (practice-id (string-utf8 30)) (practice-type (string-utf8 50)) (area-covered uint))
+    (let (
+        (rate-info (unwrap! (map-get? practice-credit-rates practice-type) err-invalid-practice))
+        (credits-earned (* area-covered (get credits-per-hectare rate-info)))
+    )
+        (asserts! (>= area-covered (get minimum-area rate-info)) (err u704))
+        
+        (map-set sustainable-practices 
+            { farmer: tx-sender, practice-id: practice-id }
+            {
+                practice-type: practice-type,
+                implementation-date: stacks-block-height,
+                area-covered: area-covered,
+                credits-per-period: credits-earned,
+                verified: (not (get verification-required rate-info)),
+                verifier: none
+            }
+        )
+        
+        (if (not (get verification-required rate-info))
+            (match (map-get? carbon-credits tx-sender)
+                existing-credits (map-set carbon-credits tx-sender
+                    {
+                        total-credits: (+ (get total-credits existing-credits) credits-earned),
+                        available-credits: (+ (get available-credits existing-credits) credits-earned),
+                        credits-sold: (get credits-sold existing-credits),
+                        last-updated: stacks-block-height
+                    })
+                (map-set carbon-credits tx-sender
+                    {
+                        total-credits: credits-earned,
+                        available-credits: credits-earned,
+                        credits-sold: u0,
+                        last-updated: stacks-block-height
+                    })
+            )
+            true
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (verify-sustainable-practice (farmer principal) (practice-id (string-utf8 30)))
+    (let (
+        (verifier-info (unwrap! (map-get? carbon-verifiers tx-sender) err-not-authorized))
+        (practice (unwrap! (map-get? sustainable-practices { farmer: farmer, practice-id: practice-id }) (err u705)))
+        (credits-to-add (get credits-per-period practice))
+    )
+        (asserts! (get active verifier-info) err-not-authorized)
+        (asserts! (not (get verified practice)) (err u706))
+        
+        (map-set sustainable-practices 
+            { farmer: farmer, practice-id: practice-id }
+            {
+                practice-type: (get practice-type practice),
+                implementation-date: (get implementation-date practice),
+                area-covered: (get area-covered practice),
+                credits-per-period: (get credits-per-period practice),
+                verified: true,
+                verifier: (some tx-sender)
+            }
+        )
+        
+        (match (map-get? carbon-credits farmer)
+            existing-credits (map-set carbon-credits farmer
+                {
+                    total-credits: (+ (get total-credits existing-credits) credits-to-add),
+                    available-credits: (+ (get available-credits existing-credits) credits-to-add),
+                    credits-sold: (get credits-sold existing-credits),
+                    last-updated: stacks-block-height
+                })
+            (map-set carbon-credits farmer
+                {
+                    total-credits: credits-to-add,
+                    available-credits: credits-to-add,
+                    credits-sold: u0,
+                    last-updated: stacks-block-height
+                })
+        )
+        
+        (map-set carbon-verifiers tx-sender
+            {
+                name: (get name verifier-info),
+                active: true,
+                verifications-completed: (+ (get verifications-completed verifier-info) u1)
+            }
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (create-carbon-credit-listing (trade-id (string-utf8 30)) (credits-amount uint) (price-per-credit uint))
+    (let (
+        (farmer-credits (unwrap! (map-get? carbon-credits tx-sender) err-insufficient-credits))
+    )
+        (asserts! (> credits-amount u0) err-invalid-credit-amount)
+        (asserts! (> price-per-credit u0) err-invalid-credit-amount)
+        (asserts! (<= credits-amount (get available-credits farmer-credits)) err-insufficient-credits)
+        
+        (map-set carbon-credit-trades 
+            { trade-id: trade-id, seller: tx-sender }
+            {
+                buyer: tx-sender,
+                credits-amount: credits-amount,
+                price-per-credit: price-per-credit,
+                total-price: (* credits-amount price-per-credit),
+                trade-date: stacks-block-height,
+                completed: false
+            }
+        )
+        
+        (map-set carbon-credits tx-sender
+            {
+                total-credits: (get total-credits farmer-credits),
+                available-credits: (- (get available-credits farmer-credits) credits-amount),
+                credits-sold: (get credits-sold farmer-credits),
+                last-updated: stacks-block-height
+            }
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (purchase-carbon-credits (trade-id (string-utf8 30)) (seller principal))
+    (let (
+        (trade (unwrap! (map-get? carbon-credit-trades { trade-id: trade-id, seller: seller }) (err u707)))
+        (seller-credits (unwrap! (map-get? carbon-credits seller) err-insufficient-credits))
+        (total-cost (get total-price trade))
+    )
+        (asserts! (not (get completed trade)) (err u708))
+        (asserts! (not (is-eq tx-sender seller)) (err u709))
+        
+        (try! (stx-transfer? total-cost tx-sender seller))
+        
+        (map-set carbon-credit-trades 
+            { trade-id: trade-id, seller: seller }
+            {
+                buyer: tx-sender,
+                credits-amount: (get credits-amount trade),
+                price-per-credit: (get price-per-credit trade),
+                total-price: total-cost,
+                trade-date: stacks-block-height,
+                completed: true
+            }
+        )
+        
+        (map-set carbon-credits seller
+            {
+                total-credits: (get total-credits seller-credits),
+                available-credits: (get available-credits seller-credits),
+                credits-sold: (+ (get credits-sold seller-credits) (get credits-amount trade)),
+                last-updated: stacks-block-height
+            }
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (generate-periodic-credits)
+    (let (
+        (farmer-credits (default-to 
+            { total-credits: u0, available-credits: u0, credits-sold: u0, last-updated: u0 }
+            (map-get? carbon-credits tx-sender)))
+        (blocks-since-update (- stacks-block-height (get last-updated farmer-credits)))
+        (periods-elapsed (/ blocks-since-update u144))
+    )
+        (asserts! (> periods-elapsed u0) (err u710))
+        
+        (map-set carbon-credits tx-sender
+            {
+                total-credits: (get total-credits farmer-credits),
+                available-credits: (get available-credits farmer-credits),
+                credits-sold: (get credits-sold farmer-credits),
+                last-updated: stacks-block-height
+            }
+        )
+        
+        (ok periods-elapsed)
+    )
+)
+
+(define-read-only (get-carbon-credits (farmer principal))
+    (map-get? carbon-credits farmer)
+)
+
+(define-read-only (get-sustainable-practice (farmer principal) (practice-id (string-utf8 30)))
+    (map-get? sustainable-practices { farmer: farmer, practice-id: practice-id })
+)
+
+(define-read-only (get-carbon-trade (trade-id (string-utf8 30)) (seller principal))
+    (map-get? carbon-credit-trades { trade-id: trade-id, seller: seller })
+)
+
+(define-read-only (get-practice-rates (practice-type (string-utf8 50)))
+    (map-get? practice-credit-rates practice-type)
+)
+
+(define-read-only (get-carbon-verifier (verifier principal))
+    (map-get? carbon-verifiers verifier)
+)
