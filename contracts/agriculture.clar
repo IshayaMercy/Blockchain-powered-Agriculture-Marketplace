@@ -1311,3 +1311,358 @@
 (define-read-only (get-carbon-verifier (verifier principal))
     (map-get? carbon-verifiers verifier)
 )
+
+
+(define-constant err-equipment-unavailable (err u800))
+(define-constant err-invalid-rental-period (err u801))
+(define-constant err-equipment-not-owned (err u802))
+(define-constant err-rental-already-active (err u803))
+(define-constant err-rental-not-found (err u804))
+(define-constant err-invalid-equipment-type (err u805))
+(define-constant err-insufficient-deposit (err u806))
+(define-constant err-equipment-not-returned (err u807))
+(define-constant err-invalid-location (err u808))
+(define-constant err-rental-expired (err u809))
+
+(define-map equipment-registry
+    { equipment-id: (string-utf8 30), owner: principal }
+    {
+        equipment-type: (string-utf8 50),
+        equipment-name: (string-utf8 100),
+        hourly-rate: uint,
+        daily-rate: uint,
+        location-code: (string-utf8 20),
+        available: bool,
+        condition-score: uint,
+        last-maintenance: uint,
+        usage-hours: uint,
+        deposit-required: uint
+    }
+)
+
+(define-map equipment-categories
+    (string-utf8 50)
+    {
+        min-deposit: uint,
+        max-rental-days: uint,
+        insurance-rate: uint,
+        maintenance-interval: uint
+    }
+)
+
+(define-map equipment-rentals
+    { rental-id: (string-utf8 30), equipment-id: (string-utf8 30) }
+    {
+        renter: principal,
+        owner: principal,
+        start-block: uint,
+        end-block: uint,
+        total-cost: uint,
+        deposit-paid: uint,
+        rental-active: bool,
+        equipment-returned: bool,
+        damage-reported: bool,
+        final-payment-made: bool
+    }
+)
+
+(define-map farmer-sharing-profiles
+    principal
+    {
+        location-code: (string-utf8 20),
+        equipment-owned: uint,
+        successful-rentals: uint,
+        failed-rentals: uint,
+        average-condition-score: uint,
+        trust-score: uint,
+        last-activity: uint
+    }
+)
+
+(define-map equipment-availability-schedule
+    { equipment-id: (string-utf8 30), date-block: uint }
+    {
+        available-hours: uint,
+        booked-hours: uint,
+        maintenance-scheduled: bool
+    }
+)
+
+(define-map rental-reviews
+    { rental-id: (string-utf8 30), reviewer: principal }
+    {
+        rating: uint,
+        equipment-condition: uint,
+        owner-reliability: uint,
+        review-text: (string-utf8 200),
+        verified: bool
+    }
+)
+
+(define-map location-networks
+    (string-utf8 20)
+    {
+        active-farmers: uint,
+        total-equipment: uint,
+        network-score: uint,
+        coordinator: (optional principal)
+    }
+)
+
+(define-public (register-equipment-category (category (string-utf8 50)) (min-deposit uint) (max-days uint) (insurance-rate uint) (maintenance-interval uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+        (map-set equipment-categories category
+            {
+                min-deposit: min-deposit,
+                max-rental-days: max-days,
+                insurance-rate: insurance-rate,
+                maintenance-interval: maintenance-interval
+            }
+        )
+        (ok true)
+    )
+)
+
+(define-public (register-equipment (equipment-id (string-utf8 30)) (equipment-type (string-utf8 50)) (equipment-name (string-utf8 100)) (hourly-rate uint) (daily-rate uint) (location-code (string-utf8 20)))
+    (let (
+        (category-info (unwrap! (map-get? equipment-categories equipment-type) err-invalid-equipment-type))
+        (required-deposit (get min-deposit category-info))
+    )
+        (asserts! (> hourly-rate u0) err-invalid-amount)
+        (asserts! (> daily-rate u0) err-invalid-amount)
+        
+        (map-set equipment-registry { equipment-id: equipment-id, owner: tx-sender }
+            {
+                equipment-type: equipment-type,
+                equipment-name: equipment-name,
+                hourly-rate: hourly-rate,
+                daily-rate: daily-rate,
+                location-code: location-code,
+                available: true,
+                condition-score: u100,
+                last-maintenance: stacks-block-height,
+                usage-hours: u0,
+                deposit-required: required-deposit
+            }
+        )
+        
+        (match (map-get? farmer-sharing-profiles tx-sender)
+            existing-profile (map-set farmer-sharing-profiles tx-sender
+                {
+                    location-code: location-code,
+                    equipment-owned: (+ (get equipment-owned existing-profile) u1),
+                    successful-rentals: (get successful-rentals existing-profile),
+                    failed-rentals: (get failed-rentals existing-profile),
+                    average-condition-score: (get average-condition-score existing-profile),
+                    trust-score: (get trust-score existing-profile),
+                    last-activity: stacks-block-height
+                })
+            (map-set farmer-sharing-profiles tx-sender
+                {
+                    location-code: location-code,
+                    equipment-owned: u1,
+                    successful-rentals: u0,
+                    failed-rentals: u0,
+                    average-condition-score: u100,
+                    trust-score: u100,
+                    last-activity: stacks-block-height
+                })
+        )
+        
+        (match (map-get? location-networks location-code)
+            existing-network (map-set location-networks location-code
+                {
+                    active-farmers: (get active-farmers existing-network),
+                    total-equipment: (+ (get total-equipment existing-network) u1),
+                    network-score: (get network-score existing-network),
+                    coordinator: (get coordinator existing-network)
+                })
+            (map-set location-networks location-code
+                {
+                    active-farmers: u1,
+                    total-equipment: u1,
+                    network-score: u50,
+                    coordinator: (some tx-sender)
+                })
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (create-equipment-rental (rental-id (string-utf8 30)) (equipment-id (string-utf8 30)) (owner principal) (rental-days uint))
+    (let (
+        (equipment (unwrap! (map-get? equipment-registry { equipment-id: equipment-id, owner: owner }) err-equipment-not-owned))
+        (category-info (unwrap! (map-get? equipment-categories (get equipment-type equipment)) err-invalid-equipment-type))
+        (daily-cost (get daily-rate equipment))
+        (total-cost (* daily-cost rental-days))
+        (deposit-amount (get deposit-required equipment))
+        (total-payment (+ total-cost deposit-amount))
+        (rental-end-block (+ stacks-block-height (* rental-days u144)))
+    )
+        (asserts! (get available equipment) err-equipment-unavailable)
+        (asserts! (> rental-days u0) err-invalid-rental-period)
+        (asserts! (<= rental-days (get max-rental-days category-info)) err-invalid-rental-period)
+        (asserts! (not (is-eq tx-sender owner)) (err u810))
+        
+        (try! (stx-transfer? total-payment tx-sender owner))
+        
+        (map-set equipment-rentals { rental-id: rental-id, equipment-id: equipment-id }
+            {
+                renter: tx-sender,
+                owner: owner,
+                start-block: stacks-block-height,
+                end-block: rental-end-block,
+                total-cost: total-cost,
+                deposit-paid: deposit-amount,
+                rental-active: true,
+                equipment-returned: false,
+                damage-reported: false,
+                final-payment-made: false
+            }
+        )
+        
+        (map-set equipment-registry { equipment-id: equipment-id, owner: owner }
+            (merge equipment { available: false })
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (return-equipment (rental-id (string-utf8 30)) (equipment-id (string-utf8 30)) (condition-score uint) (actual-hours uint))
+    (let (
+        (rental (unwrap! (map-get? equipment-rentals { rental-id: rental-id, equipment-id: equipment-id }) err-rental-not-found))
+        (equipment (unwrap! (map-get? equipment-registry { equipment-id: equipment-id, owner: (get owner rental) }) err-equipment-not-owned))
+        (owner (get owner rental))
+        (deposit-amount (get deposit-paid rental))
+        (damage-penalty (if (< condition-score u80) (/ deposit-amount u2) u0))
+        (deposit-return (- deposit-amount damage-penalty))
+    )
+        (asserts! (is-eq tx-sender (get renter rental)) err-not-authorized)
+        (asserts! (get rental-active rental) err-rental-not-found)
+        (asserts! (not (get equipment-returned rental)) err-equipment-not-returned)
+        (asserts! (and (>= condition-score u1) (<= condition-score u100)) (err u811))
+        
+        (if (> deposit-return u0)
+            (try! (stx-transfer? deposit-return owner tx-sender))
+            true
+        )
+        
+        (map-set equipment-rentals { rental-id: rental-id, equipment-id: equipment-id }
+            (merge rental { 
+                equipment-returned: true,
+                rental-active: false,
+                final-payment-made: true
+            })
+        )
+        
+        (map-set equipment-registry { equipment-id: equipment-id, owner: owner }
+            {
+                equipment-type: (get equipment-type equipment),
+                equipment-name: (get equipment-name equipment),
+                hourly-rate: (get hourly-rate equipment),
+                daily-rate: (get daily-rate equipment),
+                location-code: (get location-code equipment),
+                available: true,
+                condition-score: condition-score,
+                last-maintenance: (get last-maintenance equipment),
+                usage-hours: (+ (get usage-hours equipment) actual-hours),
+                deposit-required: (get deposit-required equipment)
+            }
+        )
+        
+        (match (map-get? farmer-sharing-profiles owner)
+            owner-profile (map-set farmer-sharing-profiles owner
+                {
+                    location-code: (get location-code owner-profile),
+                    equipment-owned: (get equipment-owned owner-profile),
+                    successful-rentals: (+ (get successful-rentals owner-profile) u1),
+                    failed-rentals: (get failed-rentals owner-profile),
+                    average-condition-score: (/ (+ (* (get average-condition-score owner-profile) (get successful-rentals owner-profile)) condition-score) (+ (get successful-rentals owner-profile) u1)),
+                    trust-score: (if (> (+ (get trust-score owner-profile) u2) u100) u100 (+ (get trust-score owner-profile) u2)),
+                    last-activity: stacks-block-height
+                })
+            true
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (rate-equipment-rental (rental-id (string-utf8 30)) (equipment-id (string-utf8 30)) (overall-rating uint) (condition-rating uint) (reliability-rating uint) (review-text (string-utf8 200)))
+    (let (
+        (rental (unwrap! (map-get? equipment-rentals { rental-id: rental-id, equipment-id: equipment-id }) err-rental-not-found))
+    )
+        (asserts! (is-eq tx-sender (get renter rental)) err-not-authorized)
+        (asserts! (get equipment-returned rental) err-equipment-not-returned)
+        (asserts! (and (>= overall-rating u1) (<= overall-rating u5)) (err u812))
+        (asserts! (and (>= condition-rating u1) (<= condition-rating u5)) (err u813))
+        (asserts! (and (>= reliability-rating u1) (<= reliability-rating u5)) (err u814))
+        
+        (map-set rental-reviews { rental-id: rental-id, reviewer: tx-sender }
+            {
+                rating: overall-rating,
+                equipment-condition: condition-rating,
+                owner-reliability: reliability-rating,
+                review-text: review-text,
+                verified: true
+            }
+        )
+        
+        (ok true)
+    )
+)
+
+(define-public (schedule-equipment-maintenance (equipment-id (string-utf8 30)) (maintenance-blocks uint))
+    (let (
+        (equipment (unwrap! (map-get? equipment-registry { equipment-id: equipment-id, owner: tx-sender }) err-equipment-not-owned))
+        (maintenance-date (+ stacks-block-height maintenance-blocks))
+    )
+        (asserts! (get available equipment) err-equipment-unavailable)
+        (asserts! (> maintenance-blocks u0) err-invalid-rental-period)
+        
+        (map-set equipment-availability-schedule { equipment-id: equipment-id, date-block: maintenance-date }
+            {
+                available-hours: u0,
+                booked-hours: u0,
+                maintenance-scheduled: true
+            }
+        )
+        
+        (map-set equipment-registry { equipment-id: equipment-id, owner: tx-sender }
+            (merge equipment { last-maintenance: maintenance-date })
+        )
+        
+        (ok true)
+    )
+)
+
+(define-read-only (get-equipment-details (equipment-id (string-utf8 30)) (owner principal))
+    (map-get? equipment-registry { equipment-id: equipment-id, owner: owner })
+)
+
+(define-read-only (get-farmer-sharing-profile (farmer principal))
+    (map-get? farmer-sharing-profiles farmer)
+)
+
+(define-read-only (get-equipment-rental (rental-id (string-utf8 30)) (equipment-id (string-utf8 30)))
+    (map-get? equipment-rentals { rental-id: rental-id, equipment-id: equipment-id })
+)
+
+(define-read-only (get-location-network (location-code (string-utf8 20)))
+    (map-get? location-networks location-code)
+)
+
+(define-read-only (get-rental-review (rental-id (string-utf8 30)) (reviewer principal))
+    (map-get? rental-reviews { rental-id: rental-id, reviewer: reviewer })
+)
+
+(define-read-only (get-equipment-category (category (string-utf8 50)))
+    (map-get? equipment-categories category)
+)
+
+(define-read-only (get-equipment-schedule (equipment-id (string-utf8 30)) (date-block uint))
+    (map-get? equipment-availability-schedule { equipment-id: equipment-id, date-block: date-block })
+)
