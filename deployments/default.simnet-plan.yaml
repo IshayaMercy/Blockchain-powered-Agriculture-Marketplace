@@ -59,4 +59,9 @@ plan:
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
             path: "contracts\\farming-cooperative.clar"
             clarity-version: 3
+        - emulated-contract-publish:
+            contract-name: weather-insurance
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: "contracts\\weather-insurance.clar"
+            clarity-version: 3
       epoch: "3.1"
